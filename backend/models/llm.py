@@ -188,3 +188,89 @@ def chat_vision(prompt: str, image_url_or_data: str) -> str:
         }
     ]
     return chat("vision", messages)
+
+def chat_stream(
+    role: str,
+    messages: list[dict[str, Any]],
+    *,
+    temperature: float = 0.3,
+    max_tokens: int = 4096,
+) -> Iterator[str]:
+    """Yield text deltas as they arrive, for the SSE `/chat/stream` route.
+
+    Groq's API streams natively (OpenAI-compatible `stream=True`).
+    OpenRouter's HTTP API streams via SSE too, so both are wired up here.
+    Unlike `chat()`, a mid-stream failure is surfaced as an error chunk
+    rather than silently retried on a fallback model: tokens may already
+    have been sent to the client, so restarting the response from scratch
+    on a different model would be a worse experience than just reporting
+    the failure.
+    """
+    model = MODELS.get(role, settings.reasoning_model)
+    missing = _missing_keys_message(model)
+    if missing:
+        yield missing
+        return
+
+    provider = _provider(model)
+    input_preview = str(messages[-1].get("content", "")) if messages else ""
+    chunks: list[str] = []
+    try:
+        if provider == "groq":
+            client = Groq(api_key=settings.groq_api_key)
+            stream = client.chat.completions.create(
+                model=_bare_model(model),
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True,
+            )
+            for event in stream:
+                delta = _content_text(event.choices[0].delta.content)
+                if delta:
+                    chunks.append(delta)
+                    yield delta
+        elif provider == "openrouter":
+            payload = {
+                "model": _bare_model(model),
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "stream": True,
+            }
+            headers = {
+                "Authorization": f"Bearer {settings.openrouter_api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "http://127.0.0.1:8000",
+                "X-Title": settings.app_name,
+            }
+            with httpx.Client(timeout=120) as client:
+                with client.stream("POST", OPENROUTER_URL, json=payload, headers=headers) as response:
+                    response.raise_for_status()
+                    for line in response.iter_lines():
+                        if not line or not line.startswith("data: "):
+                            continue
+                        data = line[len("data: ") :].strip()
+                        if data == "[DONE]":
+                            break
+                        try:
+                            event = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
+                        delta = event.get("choices", [{}])[0].get("delta", {}).get("content")
+                        if delta:
+                            chunks.append(delta)
+                            yield delta
+        else:
+            # Hugging Face role has no streaming path wired up in this app
+            # (embeddings run locally; HF is not currently used for chat
+            # completions) -- fall back to a single non-streamed chunk.
+            text = _complete(model, messages, temperature, max_tokens)
+            chunks.append(text)
+            yield text
+    except Exception as exc:
+        error_text = f"Model call failed ({role}): {exc}"
+        chunks.append(error_text)
+        yield error_text
+    finally:
+        _record(role, model, input_preview, "".join(chunks))

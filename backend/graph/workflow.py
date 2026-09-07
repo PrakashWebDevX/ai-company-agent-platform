@@ -172,3 +172,21 @@ def run_company(task: str, user_id: int | None = None) -> dict:
         }
     )
     return dict(result)
+def run_company_stream(task: str, user_id: int | None = None):
+    """Yield (node_name, partial_state) as each graph node/superstep completes.
+
+    Wraps LangGraph's own `.stream(..., stream_mode="updates")`, which
+    yields one dict per completed superstep -- `{"plan": {...}}` for a
+    single node, or `{"plan": {...}, "research": {...}}` when nodes ran in
+    parallel in the same superstep (see the fan-out/fan-in edges below).
+    Used by the `/chat/stream` SSE route so a client sees per-agent
+    progress on a run that otherwise takes 30-90+ seconds end to end.
+    """
+    initial = {
+        "task": task,
+        "user_id": user_id or settings.default_user_id,
+        "logs": [],
+    }
+    for update in get_app().stream(initial, stream_mode="updates"):
+        for node_name, partial_state in update.items():
+            yield node_name, partial_state

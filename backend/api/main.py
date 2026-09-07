@@ -145,3 +145,41 @@ async def voice(file: UploadFile = File(...)):
 @app.post("/rag")
 def rag_query(req: RagRequest):
     return {"hits": rag.retrieve(req.query, req.limit)}
+def _sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+@app.post("/chat/stream")
+def chat_stream_endpoint(req: ChatRequest, auth_user_id: int | None = Depends(get_current_user_id)):
+    """Server-Sent Events version of /chat.
+
+    mode="chat" streams text deltas token-by-token as the model generates
+    them. mode="company" streams one "agent" event per completed
+    LangGraph node (see run_company_stream) so a client gets live
+    progress across the full multi-agent run instead of waiting silently
+    for the whole pipeline to finish.
+    """
+    user_id = auth_user_id if auth_user_id is not None else req.user_id
+
+    def event_source():
+        if req.mode == "chat":
+            parts: list[str] = []
+            for delta in chat_stream(
+                "reasoning",
+                [
+                    {"role": "system", "content": "You are a helpful engineer at AI Company."},
+                    {"role": "user", "content": req.message},
+                ],
+            ):
+                parts.append(delta)
+                yield _sse("delta", {"text": delta})
+            final_text = "".join(parts)
+            memory.add_conversation(user_id, req.message, final_text)
+            yield _sse("done", {"final": final_text, "mode": "chat"})
+            return
+
+        for node_name, partial_state in run_company_stream(req.message, user_id=user_id):
+            yield _sse("agent", {"agent": node_name, "state": partial_state})
+        yield _sse("done", {"mode": "company"})
+
+    return StreamingResponse(event_source(), media_type="text/event-stream")
