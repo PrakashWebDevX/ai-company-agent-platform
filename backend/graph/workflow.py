@@ -117,6 +117,7 @@ def node_review(state: CompanyState) -> CompanyState:
     return {"review": review, "final": review, "logs": _log(state, "Reviewer")}
 
 
+
 def node_memory(state: CompanyState) -> CompanyState:
     user_id = state.get("user_id") or settings.default_user_id
     notes = extract_memories(state["task"], state.get("final") or "")

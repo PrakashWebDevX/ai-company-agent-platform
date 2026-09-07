@@ -80,3 +80,26 @@ class VectorStore:
             if name:
                 files.add(name)
         return sorted(files)
+
+    def list_all_chunks(self) -> list[dict]:
+        """Return every stored chunk's filename/text, paginating through Qdrant.
+
+        Used to (re)build the BM25 sparse index from the same data the
+        dense index already holds, instead of maintaining a second
+        persistent store.
+        """
+        rows: list[dict] = []
+        offset = None
+        while True:
+            points, offset = self.client.scroll(
+                collection_name=self.collection,
+                limit=256,
+                offset=offset,
+                with_payload=True,
+            )
+            for p in points:
+                payload = p.payload or {}
+                rows.append({"filename": payload.get("filename"), "text": payload.get("text")})
+            if offset is None:
+                break
+        return rows
